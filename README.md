@@ -32,5 +32,6 @@ npm install && railway config apply && railway up --ci --service intake-api
 railway scale --service intake-api asia-southeast1-eqsg3a=1 us-east4-eqdc4a=0   # next to Neon and the platform
 ```
 
-Railway variables: `INTAKE_DB_MODE=hosted`, `INTAKE_DB_URL_API`,
+Railway variables: `SENTRY_DSN` (error reporting; unset = off, see
+`src/cellkit/_sentry.py`), `INTAKE_DB_MODE=hosted`, `INTAKE_DB_URL_API`,
 `INTAKE_JWT_PUBLIC_KEY_PEM`, `INTAKE_JWT_ISSUER`, `EMPIRE_PLATFORM_URL`.
