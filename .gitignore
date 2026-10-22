@@ -6,7 +6,6 @@ __pycache__/
 .env.*
 .pytest_cache/
 node_modules/
-package-lock.json
 .coverage
 .coverage.*
 .mypy_cache/
