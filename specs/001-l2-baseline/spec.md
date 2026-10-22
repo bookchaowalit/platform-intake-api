@@ -89,6 +89,13 @@ Big Loop Plan Wave 2 (solo-empire `repository-catalog/roadmaps/BIG-LOOP-PLAN-202
 - **Then** the groups are queued 2, failed 1; grouping by `payload_kind` is refused with 422
 - **Test:** `tests/test_intake_queries.py::test_stats_count_intakes_per_status` · level: integration (API + throwaway PostgreSQL)
 
+### AC-09 — Numbers fit their columns
+
+- **Given** an int field (PostgreSQL integer) or a real field
+- **When** a client sends 2**31, or NaN / Infinity / 1e400 as raw JSON
+- **Then** the API answers 422 naming the field (before: a 500 from PostgreSQL, or the value silently stored as null)
+- **Test:** `tests/test_contract.py::test_numbers_fit_their_columns` · level: integration (API + throwaway PostgreSQL)
+
 ## 4. Interfaces and data
 
 | Interface | Change | Contract |
@@ -131,6 +138,7 @@ Big Loop Plan Wave 2 (solo-empire `repository-catalog/roadmaps/BIG-LOOP-PLAN-202
 | AC-06 | `tests/test_intake_defaults.py::test_a_source_with_intakes_cannot_be_deleted` | characterization (behaviour already present; passed on first run) | CI run of the pushed tip | none |
 | AC-07 | `tests/test_intake_queries.py::test_claiming_an_intake_bumps_the_version` | characterization (behaviour already present; passed on first run) | CI run of the pushed tip | none |
 | AC-08 | `tests/test_intake_queries.py::test_stats_count_intakes_per_status` | characterization (behaviour already present; passed on first run) | CI run of the pushed tip | none |
+| AC-09 | `tests/test_contract.py::test_numbers_fit_their_columns` | 841efd1 · `.venv/bin/pytest -q -k numbers_fit` · `psycopg.errors.NumericValueOutOfRange: integer out of range` | CI run of the pushed tip | none |
 
 ## 7. Risks and open questions
 
