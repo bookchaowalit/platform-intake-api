@@ -30,10 +30,10 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
@@ -43,6 +43,7 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Response,
 )
 from fastapi import (
     Request as HttpRequest,
@@ -82,7 +83,7 @@ MAX_LIMIT = 1000
 
 def _python_type(f: Field) -> Any:
     if f.type == "enum":
-        return Literal[f.values]  # type: ignore[valid-type]
+        return Literal[f.values]
     return {
         "text": str,
         "int": int,
@@ -159,7 +160,7 @@ def coerce(f: Field | None, raw: str, name: str) -> Any:
         if f.type == "date":
             return date.fromisoformat(raw)
         if f.type == "timestamp":
-            return datetime.fromisoformat(raw.replace("Z", "+00:00"))  # noqa: FURB162 - keep the explicit "Z" handling; lint pass is behaviour-neutral
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))  # noqa: FURB162 - keeps Z-normalisation; removing it changes which inputs are accepted
         if f.type == "enum" and raw not in f.values:
             raise ValueError(raw)
         return raw
@@ -167,6 +168,28 @@ def coerce(f: Field | None, raw: str, name: str) -> Any:
         raise HTTPException(
             status_code=422, detail={"error": "invalid_value", "fields": [name]}
         ) from None
+
+
+def range_errors(
+    r: Resource, row: dict[str, Any], touched: set[str] | None = None
+) -> list[str]:
+    """Fields of the resource's ranges whose start comes after their end (only pairs ``touched`` names)."""
+    bad: set[str] = set()
+    for start, end in r.ranges:
+        if touched is not None and not touched & {start, end}:
+            continue
+        low, high = _ordered(row.get(start)), _ordered(row.get(end))
+        if low is not None and high is not None and low > high:
+            bad |= {start, end}
+    return sorted(bad)
+
+
+def _ordered(value: Any) -> Any:
+    # A timestamp sent without an offset is read in the session time zone, UTC on the hosted
+    # databases (Neon default); compare it as UTC.
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def row_hash(row: dict[str, Any] | None) -> str | None:
@@ -178,7 +201,8 @@ def row_hash(row: dict[str, Any] | None) -> str | None:
 
 
 def out(row: dict[str, Any]) -> dict[str, Any]:
-    return jsonable_encoder(row)
+    encoded: dict[str, Any] = jsonable_encoder(row)
+    return encoded
 
 
 # --- the write path ----------------------------------------------------------------------------
@@ -188,7 +212,7 @@ def out(row: dict[str, Any]) -> dict[str, Any]:
 class Work:
     """One write's open local transaction; ``marker`` tags its outbox rows until the execution exists."""
 
-    conn: psycopg.Connection
+    conn: psycopg.Connection[Any]
     marker: uuid.UUID
     caller: Principal
 
@@ -222,7 +246,7 @@ class Context:
 
 def create_app(
     cell: Cell,
-    connect: Callable[[], psycopg.Connection],
+    connect: Callable[[], psycopg.Connection[Any]],
     verifier: TokenVerifier,
     platform: Platform,
     publisher_token: Callable[[], str | None] = lambda: None,
@@ -232,7 +256,9 @@ def create_app(
     schema = cell.schema
 
     @app.middleware("http")
-    async def correlate(request: HttpRequest, call_next):
+    async def correlate(
+        request: HttpRequest, call_next: Callable[[HttpRequest], Awaitable[Response]]
+    ) -> Response:
         given = request.headers.get("x-correlation-id", "")
         token = correlation_id.set(
             given if CORRELATION.match(given) else uuid.uuid4().hex
@@ -259,7 +285,7 @@ def create_app(
     Caller = Annotated[Principal, Depends(principal)]
 
     @contextmanager
-    def bound(caller: Principal) -> Iterator[psycopg.Connection]:
+    def bound(caller: Principal) -> Iterator[psycopg.Connection[Any]]:
         try:
             conn = connect()
         except psycopg.OperationalError as exc:
@@ -351,7 +377,7 @@ def create_app(
                     raise HTTPException(
                         status_code=409, detail={"error": "replayed", "status": status}
                     )
-                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema/table/column names come from the cell spec (identifier-validated in spec.py); values are bound as %s parameters
+                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
                 conn.execute(
                     f"UPDATE {schema}.outbox SET execution_id = %s WHERE execution_id = %s",
                     (execution, work.marker),
@@ -406,7 +432,11 @@ def create_app(
         return plan.result
 
     def audit(
-        r: Resource, verb: str, record_id: int, before: dict | None, after: dict | None
+        r: Resource,
+        verb: str,
+        record_id: int,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
     ) -> dict[str, Any]:
         return {
             "action": f"{cell.name}.{r.name}.{verb}",
@@ -417,7 +447,11 @@ def create_app(
         }
 
     def emit(
-        work: Work, r: Resource, verb: str, before: dict | None, after: dict | None
+        work: Work,
+        r: Resource,
+        verb: str,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
     ) -> dict[str, Any]:
         current = after or before or {}
         if r.graph is not None:
@@ -451,7 +485,7 @@ def create_app(
             try:
                 with bound(caller) as conn:
                     publish_pending(conn, schema, platform, token, limit=20)
-            except Exception as exc:  # noqa: BLE001 - the cron sweep retries any failure
+            except Exception as exc:  # noqa: BLE001 - the cron sweep retries; never fail the request for this
                 capture(exc)
                 log.warning(
                     json.dumps(
@@ -465,16 +499,21 @@ def create_app(
         background.add_task(run)
 
     def load(
-        conn: psycopg.Connection, r: Resource, record_id: int, *, lock: bool = False
+        conn: psycopg.Connection[Any],
+        r: Resource,
+        record_id: int,
+        *,
+        lock: bool = False,
     ) -> dict[str, Any]:
-        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema/table/column names come from the cell spec (identifier-validated in spec.py); values are bound as %s parameters
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
         row = conn.execute(
             f"SELECT {r.select} FROM {schema}.{r.table} WHERE id = %s{' FOR UPDATE' if lock else ''}",
             (record_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail={"error": "not_found"})
-        return row
+        found: dict[str, Any] = row
+        return found
 
     def reserve(caller: Principal, r: Resource, key: str) -> int:
         if not 8 <= len(key) <= 200:
@@ -489,12 +528,13 @@ def create_app(
                 " ON CONFLICT DO NOTHING",
                 (caller.workspace, caller.actor, r.name, key),
             )
-            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema/table/column names come from the cell spec (identifier-validated in spec.py); values are bound as %s parameters
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
             row = conn.execute(
                 f"SELECT record_id FROM {schema}.create_keys WHERE actor = %s AND kind = %s AND key = %s",
                 (caller.actor, r.name, key),
             ).fetchone()
             conn.commit()
+        assert row is not None  # the INSERT above or an earlier request created it
         return int(row["record_id"])
 
     def where(r: Resource, query: Any) -> tuple[list[str], list[Any]]:
@@ -563,7 +603,7 @@ def create_app(
                 return json.dumps(before.get(name), sort_keys=True) == json.dumps(
                     value, sort_keys=True
                 )
-            return before.get(name) == value
+            return bool(before.get(name) == value)
 
         return {name: value for name, value in data.items() if not same(name, value)}
 
@@ -572,7 +612,7 @@ def create_app(
         table = f"{schema}.{r.table}"
 
         @app.get(f"/v1/{r.plural}", name=f"list_{r.plural}")
-        def list_records(request: HttpRequest, caller: Caller):
+        def list_records(request: HttpRequest, caller: Caller) -> dict[str, Any]:
             query = request.query_params
             allow(caller, f"{cell.name}.{r.name}:read", r.name)
             clauses, params = where(r, query)
@@ -600,7 +640,7 @@ def create_app(
             )
             with bound(caller) as conn:
                 rows = conn.execute(
-                    # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- table/columns come from the identifier-validated cell spec; WHERE clauses are fixed templates with values bound as %s parameters
+                    # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- clauses/sort come from spec-validated column names with %s placeholders; values are parameters
                     f"SELECT {r.select} FROM {table} WHERE {' AND '.join(clauses)}"
                     f" ORDER BY {sort} LIMIT %s OFFSET %s",
                     [*params, limit, offset],
@@ -608,7 +648,7 @@ def create_app(
             return {"items": [out(row) for row in rows]}
 
         @app.get(f"/v1/{r.plural}/stats", name=f"stats_{r.plural}")
-        def stats(request: HttpRequest, caller: Caller):
+        def stats(request: HttpRequest, caller: Caller) -> dict[str, Any]:
             group_by = request.query_params.get("group_by", "")
             if group_by not in r.filters:
                 raise HTTPException(
@@ -619,7 +659,7 @@ def create_app(
             clauses, params = where(r, request.query_params)
             with bound(caller) as conn:
                 rows = conn.execute(
-                    # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- group_by is checked against the resource's filter allow-list before use; values are bound as %s parameters
+                    # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- group_by is checked against a fixed allow-list before use; values are %s parameters
                     f"SELECT {group_by} AS key, count(*) AS n FROM {table}"
                     f" WHERE {' AND '.join(clauses)} GROUP BY 1",
                     params,
@@ -627,10 +667,10 @@ def create_app(
             return {"groups": {str(row["key"]): row["n"] for row in rows}}
 
         @app.get(f"/v1/{r.plural}/legacy/{{legacy_id}}", name=f"{r.name}_by_legacy_id")
-        def by_legacy(legacy_id: int, caller: Caller):
+        def by_legacy(legacy_id: int, caller: Caller) -> dict[str, Any]:
             allow(caller, f"{cell.name}.{r.name}:read", r.name, not_found=True)
             with bound(caller) as conn:
-                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema/table/column names come from the cell spec (identifier-validated in spec.py); values are bound as %s parameters
+                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
                 row = conn.execute(
                     f"SELECT {r.select} FROM {table} WHERE legacy_id = %s", (legacy_id,)
                 ).fetchone()
@@ -639,7 +679,7 @@ def create_app(
             return out(row)
 
         @app.get(f"/v1/{r.plural}/{{record_id}}", name=f"get_{r.name}")
-        def get_record(record_id: int, caller: Caller):
+        def get_record(record_id: int, caller: Caller) -> dict[str, Any]:
             allow(
                 caller,
                 f"{cell.name}.{r.name}:read",
@@ -652,38 +692,44 @@ def create_app(
 
         @app.post(f"/v1/{r.plural}", status_code=201, name=f"create_{r.name}")
         def create(
-            body: create_body,  # type: ignore[valid-type]
+            body: create_body,  # type: ignore[valid-type]  # model built from cell.yaml at startup
             caller: Caller,
             background: BackgroundTasks,
             idempotency_key: Annotated[str | None, Header()] = None,
-        ):
+        ) -> dict[str, Any]:
+            # The body model is built from cell.yaml at startup, so mypy cannot see its fields.
+            sent: Any = body
             data = {
                 k: v
-                for k, v in values(r, body, body.model_fields_set).items()
+                for k, v in values(r, sent, sent.model_fields_set).items()
                 if v is not None
             }
             stamps = {
-                k: getattr(body, k)
+                k: getattr(sent, k)
                 for k in ("created_at", "updated_at")
-                if getattr(body, k) is not None
+                if getattr(sent, k) is not None
             }
-            if stamps and body.legacy_id is None:
+            if stamps and sent.legacy_id is None:
                 raise HTTPException(
                     status_code=422,
                     detail={"error": "invalid_value", "fields": sorted(stamps)},
+                )
+            if bad := range_errors(r, data):
+                raise HTTPException(
+                    status_code=422, detail={"error": "invalid_value", "fields": bad}
                 )
             # Authorize before reserving anything (a reservation is a committed row).
             allow(caller, f"{cell.name}.{r.name}:write", r.name, "new")
             # An import keeps its old id (legacy_id); a retried import then conflicts instead of duplicating.
             reserved = (
                 reserve(caller, r, idempotency_key)
-                if idempotency_key and body.legacy_id is None
+                if idempotency_key and sent.legacy_id is None
                 else None
             )
 
             def op(work: Work) -> Plan:
                 if reserved is not None:
-                    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema/table/column names come from the cell spec (identifier-validated in spec.py); values are bound as %s parameters
+                    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
                     existing = work.conn.execute(
                         f"SELECT {r.select} FROM {table} WHERE id = %s", (reserved,)
                     ).fetchone()
@@ -699,13 +745,13 @@ def create_app(
                     ["workspace_id", *row_data],
                     [caller.workspace, *row_data.values()],
                 )
-                if body.legacy_id is not None:
+                if sent.legacy_id is not None:
                     columns.append("legacy_id")
-                    params.append(body.legacy_id)
+                    params.append(sent.legacy_id)
                     for name, value in stamps.items():
                         columns.append(name)
                         params.append(value)
-                record_id = body.legacy_id if body.legacy_id is not None else reserved
+                record_id = sent.legacy_id if sent.legacy_id is not None else reserved
                 if record_id is not None:
                     columns.append("id")
                     params.append(record_id)
@@ -714,6 +760,7 @@ def create_app(
                     f" RETURNING {r.select}",
                     params,
                 ).fetchone()
+                assert row is not None  # INSERT ... RETURNING always returns the row
                 return Plan(
                     f"{cell.name}.{r.name}:write",
                     str(row["id"]),
@@ -735,17 +782,19 @@ def create_app(
         @app.patch(f"/v1/{r.plural}/{{record_id}}", name=f"update_{r.name}")
         def update(
             record_id: int,
-            body: update_body,  # type: ignore[valid-type]
+            body: update_body,  # type: ignore[valid-type]  # model built from cell.yaml at startup
             caller: Caller,
             background: BackgroundTasks,
-        ):
-            requested = values(r, body, body.model_fields_set - {"expected_version"})
+        ) -> dict[str, Any]:
+            # The body model is built from cell.yaml at startup, so mypy cannot see its fields.
+            sent: Any = body
+            requested = values(r, sent, sent.model_fields_set - {"expected_version"})
 
             def op(work: Work) -> Plan:
                 before = load(work.conn, r, record_id, lock=True)
                 if (
-                    body.expected_version is not None
-                    and before["version"] != body.expected_version
+                    sent.expected_version is not None
+                    and before["version"] != sent.expected_version
                 ):
                     raise HTTPException(
                         status_code=409,
@@ -755,6 +804,12 @@ def create_app(
                         },
                     )
                 data = changed(r, before, requested)
+                # Only pairs this patch really changes: resending stored values is never refused.
+                if bad := range_errors(r, {**before, **data}, set(data)):
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "invalid_value", "fields": bad},
+                    )
                 if not data:
                     return Plan(
                         f"{cell.name}.{r.name}:write",
@@ -791,6 +846,7 @@ def create_app(
         def delete(record_id: int, caller: Caller, background: BackgroundTasks) -> None:
             def op(work: Work) -> Plan:
                 before = load(work.conn, r, record_id, lock=True)
+                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table/column names are module constants or spec-validated identifiers; values are bound as %s parameters
                 work.conn.execute(f"DELETE FROM {table} WHERE id = %s", (record_id,))
                 return Plan(
                     f"{cell.name}.{r.name}:delete",
@@ -815,6 +871,7 @@ def create_app(
         cell.extend
     ):  # custom routes first, so a specific path wins over the generic /{id}
         module, _, function = cell.extend.partition(":")
+        # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import -- module comes from the repo-owned cell.yaml extend key, never from a request
         hook = getattr(importlib.import_module(module), function or "register")
         hook(
             Context(

@@ -25,11 +25,16 @@ MAX_BACKOFF_SECONDS = 600
 
 def token_workspace(token: str) -> str:
     """The workspace a publisher token is for (read only to choose rows; the platform verifies the token)."""
+    # nosemgrep: python.jwt.security.unverified-jwt-decode.unverified-jwt-decode -- reads only the routing claim (ws) of our own publisher token to pick rows; the platform verifies the signature
     return str(uuid.UUID(jwt.decode(token, options={"verify_signature": False})["ws"]))
 
 
 def publish_pending(
-    conn: psycopg.Connection, schema: str, platform: Any, token: str, limit: int = 100
+    conn: psycopg.Connection[Any],
+    schema: str,
+    platform: Any,
+    token: str,
+    limit: int = 100,
 ) -> dict[str, int]:
     """Publish due rows of the token's workspace; the batch is claimed and marked in one transaction.
 
@@ -62,7 +67,7 @@ def publish_pending(
         }
         try:
             platform.publish(token, event)
-        except Exception as exc:  # noqa: BLE001 - retry later with backoff; only the error class is kept
+        except Exception as exc:  # noqa: BLE001 - any publish failure is retried with backoff; only the error class is kept
             if not reported:
                 capture(exc)
                 reported = True
