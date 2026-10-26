@@ -63,7 +63,7 @@ Top level (unknown keys are refused with 422):
 
 | Field | Rule |
 |---|---|
-| `pull_id` | required; 1–80 of `A-Z a-z 0-9 . _ : -`. One id per collection run, e.g. `2026-10-26-am`. |
+| `pull_id` | required; 1–80 of `A-Z a-z 0-9 . _ : -`, not starting with a dot. One id per collection run, e.g. `2026-10-26-am`. |
 | `collected_at` | required; ISO 8601 **with an offset** (`+07:00` or `Z`), not in the future. Default for rows that have none. |
 | `posts` | required; 1–2,000 rows. |
 

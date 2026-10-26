@@ -637,3 +637,8 @@ def test_a_backfill_never_purges_text_the_lake_does_not_have(client, collector, 
     )
     exported = client.get(f"/v1/x-feed/pulls/{backfill}/rows", headers=boss).json()
     assert exported["items"][0]["text"] is not None
+
+
+def test_pull_ids_cannot_be_dot_path_segments(client, collector):
+    for dots in (".", "..", ".hidden"):
+        assert send(client, collector, rows(1), pull_id=dots).status_code == 422
