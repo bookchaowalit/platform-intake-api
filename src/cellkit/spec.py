@@ -141,6 +141,9 @@ class Cell:
     resources: tuple[Resource, ...]
     port: int = 3700
     extend: str | None = None  # "module:function" adding custom routes
+    mcp_extend: str | None = (
+        None  # "module:function" adding custom MCP tools (cellkit.mcp.Extension)
+    )
     root: Path = field(default=Path("."), compare=False)
 
     @property
@@ -336,6 +339,7 @@ def parse(data: dict[str, Any], root: Path = Path(".")) -> Cell:
         resources=tuple(resources),
         port=int(data.get("port", 3700)),
         extend=data.get("extend"),
+        mcp_extend=data.get("mcp_extend"),
         root=root,
     )
     known = {r.name for r in resources}

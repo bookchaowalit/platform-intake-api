@@ -28,6 +28,7 @@ Configuration follows the other clients (ops-toolkit ``cell_store.py``, mcp-aggr
 from __future__ import annotations
 
 import contextvars
+import importlib
 import inspect
 import os
 import re
@@ -35,6 +36,7 @@ import urllib.parse
 import uuid
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -269,6 +271,21 @@ def argument_models(cell: Cell, r: Resource) -> dict[str, type[Strict]]:
     }
 
 
+@dataclass
+class Extension:
+    """What a cell's ``mcp_extend`` hook gets to add tools that follow the same rules.
+
+    ``call(method, path, **httpx_kwargs)`` reaches the cell API as the caller; ``add(name, model,
+    description, handler)`` registers a strict tool whose handler gets the validated arguments
+    (unset ones dropped).
+    """
+
+    cell: Cell
+    call: Callable[..., Any]
+    add: Callable[[str, type[Strict], str, Callable[[dict[str, Any]], Any]], None]
+    read_only: bool
+
+
 def tool_name(cell: Cell, r: Resource, operation: str) -> str:
     return f"{cell.name}.{r.name}.{operation}"
 
@@ -382,21 +399,20 @@ def build_server(
             raise ToolFailed(f"{status}: {word}")
         return response.json() if response.content else {"deleted": True}
 
-    def add(
-        r: Resource,
-        operation: str,
+    def register(
+        name: str,
         model: type[Strict],
         description: str,
         handler: Callable[[dict[str, Any]], Any],
+        *,
+        drop_none: bool,
     ) -> None:
-        name = tool_name(cell, r, operation)
-
         def function(**kwargs: Any) -> Any:
             checked = model.model_validate(sent.get())
             # list drops unset filters; the others send exactly what the caller set (null clears a field).
             return handler(
                 checked.model_dump(mode="json", exclude_none=True)
-                if operation == "list"
+                if drop_none
                 else checked.model_dump(mode="json", exclude_unset=True)
             )
 
@@ -406,6 +422,21 @@ def build_server(
             _with_signature(function, model)
         )
         _no_preparse(server, name)
+
+    def add(
+        r: Resource,
+        operation: str,
+        model: type[Strict],
+        description: str,
+        handler: Callable[[dict[str, Any]], Any],
+    ) -> None:
+        register(
+            tool_name(cell, r, operation),
+            model,
+            description,
+            handler,
+            drop_none=operation == "list",
+        )
 
     for r in cell.resources:
         models = argument_models(cell, r)
@@ -454,6 +485,20 @@ def build_server(
         for operation in operations:
             description, handler = handlers[operation]
             add(r, operation, models[operation], description, handler)
+    if cell.mcp_extend:
+        module, _, function = cell.mcp_extend.partition(":")
+        # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import -- module comes from the repo-owned cell.yaml mcp_extend key, never from a request
+        hook = getattr(importlib.import_module(module), function or "register_mcp")
+        hook(
+            Extension(
+                cell=cell,
+                call=call,
+                add=lambda name, model, description, handler: register(
+                    name, model, description, handler, drop_none=True
+                ),
+                read_only=read_only,
+            )
+        )
     return server
 
 

@@ -142,7 +142,7 @@ def test_a_later_pull_refreshes_metrics_and_keeps_first_collected(
         headers=collector,
         json={
             "pull_id": pull_id(),
-            "collected_at": "2026-10-26T17:30:00+07:00",
+            "collected_at": "2026-10-20T17:30:00+07:00",
             "posts": [row(3, likes=50, collected_at=None)],
         },
     )
@@ -152,15 +152,15 @@ def test_a_later_pull_refreshes_metrics_and_keeps_first_collected(
         "/v1/x-posts", headers=boss, params={"post_id": post_id(3)}
     ).json()["items"][0]
     assert post["likes"] == 50
-    assert at(post["first_collected_at"]) == at("2026-10-25T23:30:00Z")
-    assert at(post["last_collected_at"]) == at("2026-10-26T10:30:00Z")
+    assert at(post["first_collected_at"]) == at("2026-10-19T23:30:00Z")
+    assert at(post["last_collected_at"]) == at("2026-10-20T10:30:00Z")
 
 
 def test_an_older_resend_does_not_roll_metrics_back(client, collector, boss):
     ingest(
         client,
         collector,
-        [row(4, likes=99, collected_at="2026-10-26T17:30:00+07:00")],
+        [row(4, likes=99, collected_at="2026-10-20T17:30:00+07:00")],
         pull_id(),
     )
     ingest(client, collector, [row(4, likes=1)], pull_id())
@@ -232,7 +232,7 @@ def test_sheet_style_values_are_normalised(client, collector, boss):
                 top="TRUE",
                 tag=["ai", "agents"],
                 query_id="",
-                posted_at="Sun Oct 25 23:00:00 +0000 2026",
+                posted_at="Mon Oct 19 23:00:00 +0000 2026",
                 text="TEST DATA nul\x00byte",
             )
         ],
@@ -244,7 +244,7 @@ def test_sheet_style_values_are_normalised(client, collector, boss):
     ).json()["items"][0]
     assert post["author_handle"] == "test_user_7"
     assert post["likes"] == 1234
-    assert at(post["posted_at"]) == at("2026-10-25T23:00:00Z")
+    assert at(post["posted_at"]) == at("2026-10-19T23:00:00Z")
     assert "\x00" not in post["text"]
     sighting = client.get(
         "/v1/x-sightings", headers=boss, params={"pull_id": pid}
@@ -539,3 +539,101 @@ def test_exported_text_older_than_the_retention_window_is_purged(
     assert (
         posts[post_id(2)]["text"] is not None
     )  # never exported: kept until the lake has it
+
+
+def test_the_exporter_scopes_reach_only_x_feed_pulls(
+    client, harness, platform, workspace, collector
+):
+    exporter = mint(
+        harness,
+        platform,
+        workspace,
+        {"intake.x-post:read", "intake.x-sighting:read", "intake.x-sighting:write"},
+    )
+    pid = pull_id()
+    ingest(client, collector, rows(2), pid)
+    pending = client.get("/v1/x-feed/pulls", headers=exporter).json()["items"]
+    assert [p["pull_id"] for p in pending] == [pid]
+    marked = client.post(
+        f"/v1/x-feed/pulls/{pid}/exported",
+        headers=exporter,
+        json={"record_count": 2, "lake_run_id": "r", "lake_bronze_object_key": "k"},
+    )
+    assert marked.status_code == 200, marked.text
+    assert client.get("/v1/x-feed/pulls", headers=exporter).json()["items"] == []
+    done = client.get(
+        "/v1/x-feed/pulls", headers=exporter, params={"status": "verified"}
+    )
+    assert [p["pull_id"] for p in done.json()["items"]] == [pid]
+    assert client.get("/v1/intakes", headers=exporter).status_code == 403
+    assert client.get("/v1/sources", headers=exporter).status_code == 403
+
+
+def test_collection_times_need_an_offset_and_cannot_be_in_the_future(client, collector):
+    result = ingest(
+        client,
+        collector,
+        [
+            row(1),
+            row(2, collected_at="2026-10-26T06:30:00"),
+            row(3, collected_at="2999-01-01T00:00:00Z"),
+        ],
+        pull_id(),
+    )
+    assert result["accepted"] == 1
+    assert {r["index"]: r["fields"] for r in result["rejected"]} == {
+        1: ["collected_at"],
+        2: ["collected_at"],
+    }
+    naive = client.post(
+        PULLS,
+        headers=collector,
+        json={
+            "pull_id": pull_id(),
+            "collected_at": "2026-10-26T06:30:00",
+            "posts": rows(1),
+        },
+    )
+    assert naive.status_code == 422
+
+
+def test_a_reader_is_refused_before_its_rows_are_parsed(
+    client, harness, platform, workspace
+):
+    reader = mint(harness, platform, workspace, {"intake.x-post:read"})
+    response = send(client, reader, [row(1, likes="lots")])
+    assert response.status_code == 403
+
+
+def test_a_partial_query_plan_row_keeps_the_stored_values(client, collector):
+    first = {"query_id": "q9", "query": "agents", "last_since_id": "123", "runs": 5}
+    client.put("/v1/x-feed/query-plan", headers=collector, json={"rows": [first]})
+    client.put(
+        "/v1/x-feed/query-plan",
+        headers=collector,
+        json={"rows": [{"query_id": "q9", "query": "agents", "runs": 6}]},
+    )
+    stored = client.get(
+        "/v1/x-query-plan", headers=collector, params={"query_id": "q9"}
+    ).json()["items"][0]
+    assert stored["runs"] == 6
+    assert stored["last_since_id"] == "123"
+
+
+def test_a_backfill_never_purges_text_the_lake_does_not_have(client, collector, boss):
+    old = pull_id()
+    ingest(client, collector, [row(5, collected_at="2026-01-01T00:00:00Z")], old)
+    client.post(
+        f"/v1/x-feed/pulls/{old}/exported",
+        headers=boss,
+        json={"record_count": 1, "lake_run_id": "r", "lake_bronze_object_key": "k"},
+    )
+    backfill = pull_id()
+    ingest(
+        client,
+        collector,
+        [row(5, collected_at="2026-01-02T00:00:00Z", query_id="q-late")],
+        backfill,
+    )
+    exported = client.get(f"/v1/x-feed/pulls/{backfill}/rows", headers=boss).json()
+    assert exported["items"][0]["text"] is not None

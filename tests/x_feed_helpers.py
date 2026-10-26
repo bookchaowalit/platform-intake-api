@@ -4,7 +4,7 @@ import uuid
 from typing import Any
 
 PULLS = "/v1/x-feed/pulls"
-COLLECTED = "2026-10-26T06:30:00+07:00"
+COLLECTED = "2026-10-20T06:30:00+07:00"
 COLLECTOR_SCOPES = {
     "intake.x-post:read",
     "intake.x-post:write",
@@ -33,7 +33,7 @@ def row(n: int, **fields: Any) -> dict[str, Any]:
         "post_id": post_id(n),
         "post_url": f"https://x.com/test_user_{n}/status/{post_id(n)}",
         "author_handle": f"test_user_{n}",
-        "posted_at": "2026-10-25T23:00:00+00:00",
+        "posted_at": "2026-10-19T23:00:00+00:00",
         "text": f"TEST DATA {n}: fake post about agents <script>alert(1)</script>",
         "likes": 10 * n,
         "reposts": n,
