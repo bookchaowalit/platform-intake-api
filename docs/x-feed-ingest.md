@@ -9,7 +9,7 @@ watchlist and query plan here instead of in the Google Sheet. Plain HTTPS with J
 | Base URL | `https://intake-api-production.up.railway.app` |
 | Auth | `Authorization: Bearer <x-feed-collector token>` |
 | Content type | `Content-Type: application/json` (UTF-8) |
-| Push cadence | after each pull (about 06:30 and 17:30 ICT) |
+| Push cadence | after each pull (about 07:10 and 18:30 ICT; the collector stops at 380 X calls a day) |
 | Batch limit | 2,000 posts per request; send more as several requests with the same `pull_id` |
 
 The token belongs to the platform automation `x-feed-collector`. It can write X posts, the watchlist
