@@ -490,11 +490,13 @@ def register(ctx: Context) -> None:
     def land_intake(
         conn: psycopg.Connection[Any], ws: Any, source: int, pull: str, new_rows: int
     ) -> int:
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
         count = conn.execute(
             f"SELECT count(*) AS n FROM {schema}.x_sightings WHERE pull_id = %s",
             (pull,),
         ).fetchone()
         total = int(count["n"]) if count else 0
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
         existing = conn.execute(
             f"SELECT id, status FROM {schema}.intakes WHERE intake_key = %s FOR UPDATE",
             (f"{SOURCE_KEY}:{pull}",),
@@ -630,6 +632,7 @@ def register(ctx: Context) -> None:
                 },
             ).fetchall()
             new_posts = sum(1 for r in post_rows if r["inserted"])
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
             added = conn.execute(
                 insert_sightings,
                 {
@@ -913,16 +916,19 @@ def register(ctx: Context) -> None:
             conn, ws = work.conn, work.caller.workspace
             # Every x-feed write takes the source row first (ingest stamps it), so a mark and an
             # ingest of the same posts never lock in opposite orders.
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
             conn.execute(
                 f"SELECT id FROM {schema}.sources WHERE source_key = %s FOR UPDATE",
                 (SOURCE_KEY,),
             )
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
             found = conn.execute(
                 f"SELECT id, status FROM {schema}.intakes WHERE intake_key = %s FOR UPDATE",
                 (f"{SOURCE_KEY}:{pull}",),
             ).fetchone()
             if found is None:
                 raise HTTPException(status_code=404, detail={"error": "not_found"})
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- schema is the repo-owned cell.yaml schema; values are bound as %s parameters
             count = conn.execute(
                 f"SELECT count(*) AS n FROM {schema}.x_sightings WHERE pull_id = %s",
                 (pull,),
