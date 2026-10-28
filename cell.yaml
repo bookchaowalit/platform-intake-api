@@ -4,9 +4,9 @@ cell: intake
 title: Intake
 port: 3624
 # X (Twitter) feed: posts, per-pull sightings, the collector's watchlist and query plan. The batch
-# ingest, upserts, search and lake-export routes live in src/solo_intake/x_feed.py.
+# ingest, upserts, search and lake-export routes live in src/solo_intake/x_feed.py; its MCP tools in x_feed_mcp.py.
 extend: solo_intake.x_feed:register
-mcp_extend: solo_intake.x_feed:register_mcp
+mcp_extend: solo_intake.x_feed_mcp:register_mcp
 resources:
   source:
     table: sources
