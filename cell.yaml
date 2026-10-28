@@ -3,6 +3,10 @@
 cell: intake
 title: Intake
 port: 3624
+# X (Twitter) feed: posts, per-pull sightings, the collector's watchlist and query plan. The batch
+# ingest, upserts, search and lake-export routes live in src/solo_intake/x_feed.py.
+extend: solo_intake.x_feed:register
+mcp_extend: solo_intake.x_feed:register_mcp
 resources:
   source:
     table: sources
@@ -67,3 +71,78 @@ resources:
       from_status: {type: text, max_length: 32}
       to_status: {type: text, required: true, max_length: 32}
       reason: {type: text, max_length: 500}
+  x-post:
+    table: x_posts
+    plural: x-posts
+    filters: [post_id, author_handle]
+    fields:
+      post_id: {type: text, required: true, max_length: 32, unique: true}
+      post_url: {type: text, max_length: 300}
+      author_handle: {type: text, max_length: 64}
+      posted_at: {type: timestamp}
+      text: {type: text, max_length: 30000}
+      likes: {type: bigint, min: 0}
+      reposts: {type: bigint, min: 0}
+      replies: {type: bigint, min: 0}
+      views: {type: bigint, min: 0}
+      first_collected_at: {type: timestamp}
+      last_collected_at: {type: timestamp}
+      last_pull_id: {type: text, max_length: 96}
+      exported_at: {type: timestamp}
+      text_purged_at: {type: timestamp}
+  x-sighting:
+    table: x_sightings
+    plural: x-sightings
+    filters: [pull_id, post_id, requesting_chief, query_id, watch_type]
+    unique: [[pull_id, post_id, query_id, requesting_chief]]
+    fields:
+      pull_id: {type: text, required: true, max_length: 96}
+      post_id: {type: text, required: true, max_length: 32}
+      collected_at: {type: timestamp, required: true}
+      requesting_chief: {type: text, required: true, max_length: 64}
+      watch_type: {type: text, max_length: 32}
+      watch_value: {type: text, max_length: 200}
+      query_id: {type: text, required: true, max_length: 64}
+      tag: {type: text, max_length: 300}
+      score: {type: real}
+      top: {type: bool}
+      likes: {type: bigint, min: 0}
+      reposts: {type: bigint, min: 0}
+      replies: {type: bigint, min: 0}
+      views: {type: bigint, min: 0}
+  x-watch:
+    table: x_watchlist
+    plural: x-watchlist
+    filters: [requesting_chief, type, tag]
+    unique: [[requesting_chief, type, value]]
+    fields:
+      requesting_chief: {type: text, required: true, max_length: 64}
+      type: {type: text, required: true, max_length: 32}
+      value: {type: text, required: true, max_length: 200}
+      purpose: {type: text, max_length: 500}
+      added_date: {type: date}
+      last_used: {type: timestamp}
+      tag: {type: text, max_length: 300}
+  x-query:
+    table: x_query_plan
+    plural: x-query-plan
+    filters: [query_id, status, query_type]
+    fields:
+      query_id: {type: text, required: true, max_length: 64, unique: true}
+      query: {type: text, required: true, max_length: 1000}
+      requesting_chiefs: {type: text, max_length: 300}
+      tags: {type: text, max_length: 300}
+      watchlist_rows: {type: text, max_length: 500}
+      priority: {type: int}
+      last_since_id: {type: text, max_length: 32}
+      last_run_at: {type: timestamp}
+      runs: {type: int, min: 0}
+      calls_total: {type: int, min: 0}
+      posts_total: {type: int, min: 0}
+      new_posts_last: {type: int, min: 0}
+      avg_yield: {type: real}
+      status: {type: text, max_length: 32}
+      calls_last_run: {type: int, min: 0}
+      yield_last6: {type: text, max_length: 200}
+      query_type: {type: text, max_length: 32}
+      lang_filter: {type: text, max_length: 32}
