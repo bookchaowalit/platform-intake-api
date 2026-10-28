@@ -65,3 +65,18 @@ def test_tools_refuse_identity_and_unknown_arguments(tools):
     server, _ = tools
     with pytest.raises(ToolFailed):
         asyncio.run(server.call_tool("intake.x-feed.search", {"workspace_id": "x"}))
+
+
+def test_api_hook_loads_without_the_mcp_extra() -> None:
+    """The production image installs no ``mcp`` extra: the API's ``extend`` hook must not need it."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['mcp'] = None\n"
+        "import importlib, yaml\n"
+        "module = yaml.safe_load(open('cell.yaml'))['extend'].partition(':')[0]\n"
+        "importlib.import_module(module)\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-400:]
