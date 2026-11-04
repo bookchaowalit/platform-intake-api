@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=2.3,<3"]
+relay = ["confluent-kafka>=2.16,<3"]  # intake-relay (ADR-0008 event outbox); not needed by the API image
 dev = [
     "pytest>=8",
     "pytest-cov>=7",
@@ -23,6 +24,7 @@ dev = [
     "mcp>=2.3,<3",
     "mypy>=2.4",
     "types-PyYAML>=6",
+    "confluent-kafka>=2.16,<3",
 ]
 
 [project.scripts]
@@ -30,6 +32,7 @@ intake-mcp = "cellkit.mcp:main"
 intake-api = "cellkit.server:api"
 intake-publish = "cellkit.server:run_publish"
 intake-db = "cellkit.server:run_db"
+intake-relay = "solo_intake.event_outbox:main"
 
 [build-system]
 requires = ["setuptools>=69"]

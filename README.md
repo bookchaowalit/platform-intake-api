@@ -46,6 +46,11 @@ Dependencies are locked in `uv.lock`; the image installs them with `uv sync --fr
 production runs the versions CI tested. Change a dependency with `uv add`/`uv lock` and commit
 the lock. Product scope and measures: [PRODUCT.md](PRODUCT.md); change records: `specs/`.
 
+Events (ADR-0008 M5, migration `0003_event_outbox.sql`): a trigger on `intake.intakes` writes
+`intake.intake.<status>` envelopes (reference fields only) to `intake.event_outbox` on every new intake
+and status change; `.github/workflows/relay-outbox.yml` (jobs queue `intake-relay`, hourly at :53) runs
+`intake-relay` as role `intake_relay` and publishes them to Kafka `data.ingest.v1`.
+
 Deploys (CD, since 2026-10-18): `intake-api` is connected to this repository's `main` with
 Railway's Wait for CI (`checkSuites`). A merge to `main` deploys only after the CI and security
 checks pass; a failing check leaves production on the previous deployment. Roll back by
