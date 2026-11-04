@@ -134,6 +134,17 @@ class Resource:
         return tuple(f for f in self.fields if f.type == "ref")
 
 
+def _extra_roles(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[a-z][a-z0-9]{0,20}", item)
+        for item in value
+    ):
+        raise SpecError("extra_roles must be a list of short lower-case role kinds")
+    if {"api", "publisher", "migrator"} & set(value):
+        raise SpecError("extra_roles cannot repeat api, publisher or migrator")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class Cell:
     name: str
@@ -144,6 +155,9 @@ class Cell:
     mcp_extend: str | None = (
         None  # "module:function" adding custom MCP tools (cellkit.mcp.Extension)
     )
+    # Login roles beyond api and publisher that the cell's migrations grant to (e.g. "relay");
+    # provisioning creates them like the runtime roles.
+    extra_roles: tuple[str, ...] = ()
     root: Path = field(default=Path("."), compare=False)
 
     @property
@@ -340,6 +354,7 @@ def parse(data: dict[str, Any], root: Path = Path(".")) -> Cell:
         port=int(data.get("port", 3700)),
         extend=data.get("extend"),
         mcp_extend=data.get("mcp_extend"),
+        extra_roles=_extra_roles(data.get("extra_roles", [])),
         root=root,
     )
     known = {r.name for r in resources}

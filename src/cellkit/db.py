@@ -54,8 +54,9 @@ class Names:
         return self.cell.role("migrator")
 
     @property
-    def runtime_roles(self) -> tuple[str, str]:
-        return self.cell.role("api"), self.cell.role("publisher")
+    def runtime_roles(self) -> tuple[str, ...]:
+        extra = tuple(self.cell.role(kind) for kind in self.cell.extra_roles)
+        return (self.cell.role("api"), self.cell.role("publisher"), *extra)
 
     @property
     def migrations(self) -> Path:

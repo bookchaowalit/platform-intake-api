@@ -3,6 +3,8 @@
 cell: intake
 title: Intake
 port: 3624
+# intake_relay relays intake.event_outbox to Kafka (migration 0003, ADR-0008); provision creates it.
+extra_roles: [relay]
 # X (Twitter) feed: posts, per-pull sightings, the collector's watchlist and query plan. The batch
 # ingest, upserts, search and lake-export routes live in src/solo_intake/x_feed.py; its MCP tools in x_feed_mcp.py.
 extend: solo_intake.x_feed:register

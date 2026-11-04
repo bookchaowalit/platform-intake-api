@@ -173,3 +173,20 @@ def test_kafka_config_and_main_without_a_url(monkeypatch):
     monkeypatch.delenv("INTAKE_RELAY_DATABASE_URL", raising=False)
     with pytest.raises(SystemExit):
         event_outbox.main([])
+
+
+def test_provisioning_creates_the_relay_role_with_the_runtime_roles(cell_root):
+    from cellkit.db import Names
+    from cellkit.testing import spec_from
+
+    # A fresh hosted `intake-db provision` must create intake_relay before migration 0003 grants to it.
+    assert "intake_relay" in Names(spec_from(cell_root)).runtime_roles
+
+
+def test_extra_roles_are_validated():
+    from cellkit.spec import SpecError, _extra_roles
+
+    assert _extra_roles(["relay"]) == ("relay",)
+    for bad in ("relay", ["API"], ["api"], [1]):
+        with pytest.raises(SpecError):
+            _extra_roles(bad)
