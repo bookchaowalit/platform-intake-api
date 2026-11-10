@@ -458,6 +458,9 @@ def _json_rows(items: list[dict[str, Any]]) -> Jsonb:
 
 
 def register(ctx: Context) -> None:
+    from solo_intake import x_intel  # SPEC-003: the read API over the lakehouse marts
+
+    x_intel.register(ctx)
     schema, cell = ctx.cell.schema, ctx.cell.name
     _, authenticate = get_args(ctx.caller)
     Caller = Annotated[Principal, authenticate]

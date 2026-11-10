@@ -31,6 +31,11 @@ The X feed (source `x-feed`, pushed by the Grok Bot collector) adds batch and se
 and the lake export rows and mark. Contract: [docs/x-feed-ingest.md](docs/x-feed-ingest.md);
 change record: [specs/002-x-feed](specs/002-x-feed/spec.md).
 
+`/v1/x-intel/` (`src/solo_intake/x_intel.py`, read-only): status, signals, domains, claims, analyses and digests
+from the X lakehouse marts (data-lake-pipelines `x_lakehouse`, Supabase schema `x_intel`) for the owner's AIs,
+through the read-only role `x_intel_reader`; rows naming a client are withheld. MCP tools `intake.x-intel.*`.
+Change record: [specs/003-x-intel-read](specs/003-x-intel-read/spec.md).
+
 ## Develop and operate
 
 ```bash
@@ -59,4 +64,7 @@ redeploying an earlier deployment in Railway. `railway up` is no longer used.
 Railway variables: `SENTRY_DSN` (error reporting; unset = off, see
 `src/cellkit/_sentry.py`), `INTAKE_DB_MODE=hosted`, `INTAKE_DB_URL_API`,
 `INTAKE_JWT_PUBLIC_KEY_PEM`, `INTAKE_JWT_ISSUER`, `EMPIRE_PLATFORM_URL`,
-`INTAKE_X_FEED_RETENTION_DAYS` (X post text kept in Neon after export; default 180).
+`INTAKE_X_FEED_RETENTION_DAYS` (X post text kept in Neon after export; default 180),
+`INTAKE_X_INTEL_DB_URL` (Supabase `x_intel_reader`, Infisical `/x-lakehouse` `X_INTEL_READER_DB_URL`),
+`INTAKE_X_INTEL_WORKSPACE` (the owner workspace id) and `INTAKE_CLIENT_DENYLIST` (same list as the X digest);
+without all three `/v1/x-intel/*` answers 503.
