@@ -403,3 +403,52 @@ def test_freshness_has_no_window(api, owner_x):
     assert set(rows) == {"x_signals", "claims", "x_analyses", "digest_log"}
     assert all(rows.values())
     assert get(api, owner_x, "freshness").json()["withheld"] == 0
+
+
+def test_denylist_folds_compatibility_letters_before_case():
+    deny = x_intel.parse_denylist("Acme Corp")
+    bold = "\U0001d400\U0001d41c\U0001d426\U0001d41e-Corp"  # MATHEMATICAL BOLD "Acme" + "-Corp"
+    assert x_intel.contains_term(bold, deny)
+    full_width = "".join(
+        chr(0xFF21 + i) for i in (0, 2, 12, 4)
+    )  # "ACME" in full-width capitals
+    assert x_intel.contains_term(full_width + "_corp", deny)
+
+
+def test_x3_withheld_rows_never_make_a_page_short(lake, api, owner_x):
+    import psycopg
+
+    with psycopg.connect(lake.replace(READER, "postgres"), autocommit=True) as conn:
+        conn.execute("DELETE FROM x_intel.mart_x_signal_priority")
+        # 60 high-priority rows that name a client, then one clean row: more than one scan batch (50).
+        for n in range(60):
+            conn.execute(
+                "INSERT INTO x_intel.mart_x_signal_priority (post_id, collected_at, post_text, priority)"
+                " VALUES (%s, now(), 'TEST about Acme Corp', 9000 - %s)",
+                (f"bad{n:02d}", n),
+            )
+        conn.execute(
+            "INSERT INTO x_intel.mart_x_signal_priority (post_id, collected_at, post_text, priority)"
+            " VALUES ('clean', now(), 'TEST clean', 1)"
+        )
+    body = get(api, owner_x, "signals", limit=1).json()
+    assert [s["post_id"] for s in body["items"]] == ["clean"]
+    assert body["withheld"] == 60
+    assert body["scan_capped"] is False
+
+
+def test_scan_stops_at_the_cap(monkeypatch, lake, api, owner_x):
+    import psycopg
+
+    monkeypatch.setattr(x_intel, "SCAN_CAP", 50)
+    with psycopg.connect(lake.replace(READER, "postgres"), autocommit=True) as conn:
+        conn.execute("DELETE FROM x_intel.mart_x_signal_priority")
+        for n in range(80):
+            conn.execute(
+                "INSERT INTO x_intel.mart_x_signal_priority (post_id, collected_at, post_text, priority)"
+                " VALUES (%s, now(), 'TEST Acme Corp', 100 - %s)",
+                (f"bad{n:02d}", n),
+            )
+    body = get(api, owner_x, "signals", limit=1).json()
+    assert body["items"] == []
+    assert body["scan_capped"] is True

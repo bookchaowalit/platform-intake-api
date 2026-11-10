@@ -113,9 +113,10 @@ def normalize(text: str) -> str:
 
 
 def skeleton(text: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum()
-    )
+    # Fold compatibility forms (full-width, mathematical bold, ...) before casefold: casefold leaves
+    # U+1D400 MATHEMATICAL BOLD A as is, and NFKD after it would give an upper-case A that never matches.
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return "".join(c for c in unicodedata.normalize("NFKD", folded) if c.isalnum())
 
 
 def parse_denylist(raw: str) -> tuple[str, ...]:
@@ -230,16 +231,37 @@ def _cut(value: Any) -> Any:
     return value
 
 
-def _screen(
-    rows: list[dict[str, Any]], denylist: Sequence[str], limit: int
-) -> tuple[list[dict[str, Any]], int]:
-    kept, held = [], 0
-    for r in rows:
-        if any_term(r, denylist):  # every field, before any cut
-            held += 1
-        else:
-            kept.append({k: _cut(v) for k, v in r.items()})
-    return kept[:limit], held
+SCAN_CAP = 5000  # rows read at most for one page; past it the page may be short (``scan_capped``)
+
+
+def _scan(
+    conn: psycopg.Connection[Any],
+    sql: str,
+    params: Sequence[Any],
+    denylist: Sequence[str],
+    limit: int,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Read ``sql`` (ordered on a unique tail, without LIMIT) in batches until ``limit`` rows pass the denylist
+    or the rows run out, so withheld rows never make a page short (SPEC-003 X3). Every field is screened
+    before any cut. Returns (rows, withheld among the rows read, scan_capped)."""
+    kept: list[dict[str, Any]] = []
+    held = offset = 0
+    batch = max(limit * 3, 50)
+    while len(kept) < limit and offset < SCAN_CAP:
+        rows = conn.execute(
+            f"{sql} LIMIT %s OFFSET %s", [*params, batch, offset]
+        ).fetchall()
+        for r in rows:
+            if len(kept) >= limit:
+                break
+            if any_term(r, denylist):
+                held += 1
+            else:
+                kept.append({k: _cut(v) for k, v in r.items()})
+        offset += len(rows)
+        if len(rows) < batch:
+            return kept, held, False
+    return kept, held, len(kept) < limit
 
 
 # --- routes --------------------------------------------------------------------------------------------
@@ -313,14 +335,16 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
             else "collected_at DESC, post_id"
         )
         with reader(caller) as conn:
-            rows = conn.execute(
+            items, held, capped = _scan(
+                conn,
                 # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- clauses and order are fixed strings; every value is a %s parameter
                 f"SELECT {', '.join(SIGNAL_COLS)} FROM {S}.mart_x_signal_priority WHERE {' AND '.join(clauses)}"
-                f" ORDER BY {by} LIMIT %s",
-                [*params, limit * 3],
-            ).fetchall()
-        items, held = _screen(rows, settings.denylist, limit)
-        return out(items, held, since=since)
+                f" ORDER BY {by}",
+                params,
+                settings.denylist,
+                limit,
+            )
+        return out(items, held, since=since, scan_capped=capped)
 
     @ctx.app.get("/v1/x-intel/domains", tags=["x-intel"])
     def domains(request: HttpRequest, caller: Caller) -> dict[str, Any]:
@@ -351,14 +375,16 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
         source = f"{S}.mart_claims_queue" if state == "open" else f"{S}.claims"
         where, params = ("WHERE claim ILIKE %s", [_like(text)]) if text else ("", [])
         with reader(caller) as conn:
-            rows = conn.execute(
+            items, held, capped = _scan(
+                conn,
                 # nosemgrep: python.django.security.injection.tainted-sql-string.tainted-sql-string -- source and where are fixed strings; values are %s parameters
                 f"SELECT {', '.join(CLAIM_COLS)} FROM {source} {where}"
-                " ORDER BY priority NULLS LAST, next_check NULLS LAST, claim_id LIMIT %s",
-                [*params, limit * 3],
-            ).fetchall()
-        items, held = _screen(rows, settings.denylist, limit)
-        return out(items, held, state=state)
+                " ORDER BY priority NULLS LAST, next_check NULLS LAST, claim_id",
+                params,
+                settings.denylist,
+                limit,
+            )
+        return out(items, held, state=state, scan_capped=capped)
 
     @ctx.app.get("/v1/x-intel/analyses", tags=["x-intel"])
     def analyses(request: HttpRequest, caller: Caller) -> dict[str, Any]:
@@ -371,30 +397,32 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
                     f"SELECT max(report_week) AS w FROM {S}.x_analyses"
                 ).fetchone()
                 week = newest["w"] if newest else None
-            rows = (
-                conn.execute(
+            items, held, capped = (
+                _scan(
+                    conn,
                     f"SELECT {', '.join(ANALYSIS_COLS)} FROM {S}.x_analyses WHERE report_week = %s"
-                    " ORDER BY analysis, rank NULLS LAST, item LIMIT %s",
-                    [week, limit * 3],
-                ).fetchall()
+                    " ORDER BY analysis, rank NULLS LAST, item, post_id",
+                    [week],
+                    settings.denylist,
+                    limit,
+                )
                 if week
-                else []
+                else ([], 0, False)
             )
-        items, held = _screen(rows, settings.denylist, limit)
-        return out(items, held, week=week)
+        return out(items, held, week=week, scan_capped=capped)
 
     @ctx.app.get("/v1/x-intel/digests", tags=["x-intel"])
     def digests(request: HttpRequest, caller: Caller) -> dict[str, Any]:
         limit = _int(request.query_params, "limit", 10, 1, 50)
         with reader(caller) as conn:
-            rows = conn.execute(
-                f"SELECT {', '.join(DIGEST_COLS)} FROM {S}.digest_log ORDER BY window_end DESC, digest_id LIMIT %s",
-                [limit * 3],
-            ).fetchall()
-        items, held = _screen(
-            rows, settings.denylist, limit
-        )  # error text can name a client too
-        return out(items, held)
+            items, held, capped = _scan(  # error text can name a client too
+                conn,
+                f"SELECT {', '.join(DIGEST_COLS)} FROM {S}.digest_log ORDER BY window_end DESC, digest_id",
+                [],
+                settings.denylist,
+                limit,
+            )
+        return out(items, held, scan_capped=capped)
 
     @ctx.app.get("/v1/x-intel/freshness", tags=["x-intel"])
     def freshness(caller: Caller) -> dict[str, Any]:
