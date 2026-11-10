@@ -452,3 +452,44 @@ def test_scan_stops_at_the_cap(monkeypatch, lake, api, owner_x):
     body = get(api, owner_x, "signals", limit=1).json()
     assert body["items"] == []
     assert body["scan_capped"] is True
+
+
+def test_domains_count_the_hour_that_straddles_the_cutoff(lake, api, owner_x):
+    import psycopg
+
+    with psycopg.connect(lake.replace(READER, "postgres"), autocommit=True) as conn:
+        conn.execute("DELETE FROM x_intel.mart_x_domain_hourly")
+        # The bucket that holds "now - 1 day": its signals may be inside the window, so it must count.
+        conn.execute(
+            "INSERT INTO x_intel.mart_x_domain_hourly VALUES (date_trunc('hour', (now() - interval '1 day')"
+            " AT TIME ZONE 'Asia/Bangkok'), 'D5 Technology', 4, 0, 0, 0, 0, 1),"
+            " (date_trunc('hour', (now() - interval '1 day') AT TIME ZONE 'Asia/Bangkok') - interval '1 hour',"
+            " 'D5 Technology', 100, 0, 0, 0, 0, 1)"
+        )
+    body = get(api, owner_x, "domains", days=1).json()
+    assert [(d["domain"], d["signals"]) for d in body["items"]] == [
+        ("D5 Technology", 4)
+    ]
+    assert body["since"].endswith(":00:00+00:00") or body["since"].endswith(":00:00Z")
+
+
+def test_each_request_reads_one_snapshot(monkeypatch, api, owner_x):
+    seen = []
+    real = x_intel._scan
+
+    def spy(conn, *args, **kwargs):
+        seen.append(
+            conn.execute("SHOW transaction_isolation").fetchone()[
+                "transaction_isolation"
+            ]
+        )
+        seen.append(
+            conn.execute("SHOW transaction_read_only").fetchone()[
+                "transaction_read_only"
+            ]
+        )
+        return real(conn, *args, **kwargs)
+
+    monkeypatch.setattr(x_intel, "_scan", spy)
+    assert get(api, owner_x, "signals").status_code == 200
+    assert seen == ["repeatable read", "on"]

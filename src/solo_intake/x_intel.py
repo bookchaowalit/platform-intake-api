@@ -289,7 +289,12 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
                 status_code=503, detail={"error": "unavailable"}
             ) from exc
         try:
-            yield conn
+            # One snapshot per request: _scan pages with OFFSET over several statements, and rows ingested between
+            # them must not shift a page (a repeated or skipped row).
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+            conn.read_only = True
+            with conn.transaction():
+                yield conn
         except psycopg.Error as exc:
             raise HTTPException(
                 status_code=503, detail={"error": "unavailable"}
@@ -349,7 +354,11 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
     @ctx.app.get("/v1/x-intel/domains", tags=["x-intel"])
     def domains(request: HttpRequest, caller: Caller) -> dict[str, Any]:
         days = _int(request.query_params, "days", 7, 1, 30)
-        since = datetime.now(UTC) - timedelta(days=days)
+        # The mart is hourly: start at the top of the hour that holds "now - days", so the bucket straddling the cutoff
+        # counts whole instead of being dropped (the window is up to 59 minutes longer than N days; "since" says so).
+        since = (datetime.now(UTC) - timedelta(days=days)).replace(
+            minute=0, second=0, microsecond=0
+        )
         with reader(caller) as conn:
             rows = conn.execute(
                 f"SELECT domain, sum(signals)::bigint AS signals, sum(alerts)::bigint AS alerts,"
@@ -364,7 +373,7 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
             if contains_term(str(r["domain"]), settings.denylist):
                 r["domain"] = WITHHELD
                 masked += 1
-        return out(rows, masked, days=days)
+        return out(rows, masked, days=days, since=since)
 
     @ctx.app.get("/v1/x-intel/claims", tags=["x-intel"])
     def claims(request: HttpRequest, caller: Caller) -> dict[str, Any]:
