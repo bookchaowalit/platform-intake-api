@@ -44,9 +44,11 @@ Standard: ADR-0004 — TDD + SDD (architecture-docs, `docs/architecture/decision
 - **X4 Reads.** `signals` (since default −24 h, until, domain, alert = any|urgent|digest, q (text contains),
   min_score, order = priority|recent, limit 1–200 default 20) from `mart_x_signal_priority`; `domains` (days 1–30,
   default 7) from `mart_x_domain_hourly`; `claims` (state = open|all, q, limit) from `mart_claims_queue` / `claims`;
-  `analyses` (week, default the newest) from `x_analyses`; `digests` (limit ≤ 50) from `digest_log` (ids, status,
+  `analyses` (week, default the newest) from `x_analyses`; `digests` (limit ≤ 50, screened like the rest: the error
+  text can name a client) from `digest_log` (ids, status,
   counts, cost; never message text); `status` = newest signal, signals last 24 h, open claims, newest digest and
-  analysis week. Text fields are cut to 1,000 characters. Post text is untrusted user content: returned as data.
+  analysis week; `freshness` = the newest timestamp per dataset with no time window (the data-sources probe).
+  Text fields are cut to 1,000 characters. Post text is untrusted user content: returned as data.
 - **X5 Bad input → 422**, never a 500 (dates not ISO 8601, unknown enum values, out-of-range numbers).
 - **X6 Read-only all the way down.** The role `x_intel_reader` has SELECT on those six relations only,
   `default_transaction_read_only = on` and `statement_timeout = 8s`; the API opens its own short connection per request.

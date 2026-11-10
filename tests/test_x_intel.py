@@ -25,10 +25,13 @@ CREATE TABLE x_intel.mart_x_signal_priority (
 CREATE TABLE x_intel.mart_x_domain_hourly (hour_ict timestamp, domain text, signals bigint, alerts bigint,
   urgent bigint, opportunities bigint, strong_sources bigint, avg_score numeric);
 CREATE TABLE x_intel.claims (claim_id text, claim text, verification_status text, queue_state text,
-  priority double precision, next_check timestamptz, last_checked timestamptz, first_seen_link text, checked_by text);
-CREATE VIEW x_intel.mart_claims_queue AS SELECT * FROM x_intel.claims WHERE queue_state = 'open';
+  priority double precision, next_check timestamptz, last_checked timestamptz, first_seen_link text, checked_by text,
+  updated_at timestamptz DEFAULT now());
+CREATE VIEW x_intel.mart_claims_queue AS SELECT claim_id, claim, verification_status, queue_state, priority, next_check,
+  last_checked, first_seen_link, checked_by FROM x_intel.claims WHERE queue_state = 'open';
 CREATE TABLE x_intel.x_analyses (report_week text, analysis text, rank bigint, item text, post_id text, link text,
-  topic text, book_domain text, geo text, value text, value_kind text, source_tier text, metric text, note text);
+  topic text, book_domain text, geo text, value text, value_kind text, source_tier text, metric text, note text,
+  updated_at timestamptz DEFAULT now());
 CREATE TABLE x_intel.digest_log (digest_id text, kind text, window_start timestamptz, window_end timestamptz,
   status text, signals int, sent_messages int, cost_usd numeric, error text, updated_at timestamptz,
   tokens_in int, tokens_out int);
@@ -110,7 +113,8 @@ def lake(harness):
         conn.execute(
             "INSERT INTO x_intel.digest_log (digest_id, kind, window_end, status, signals, cost_usd, updated_at)"
             " VALUES ('midday:2026-11-10', 'midday', now(), 'sent', 189, 0.0012, now()),"
-            " ('morning:2026-11-10', 'morning', now() - interval '8 hour', 'sent', 522, 0.0011, now())"
+            " ('morning:2026-11-10', 'morning', now() - interval '8 hour', 'sent', 522, 0.0011, now()),"
+            " ('daily:2026-11-09', 'daily', now() - interval '20 hour', 'sent', 792, 0.0012, now())"
         )
     return f"host={harness.cluster.socket_dir} port={PORT} user={READER} dbname={harness.cluster.names.database}"
 
@@ -283,6 +287,7 @@ def test_x4_digests_and_status(api, owner_x):
     assert [d["digest_id"] for d in digests] == [
         "midday:2026-11-10",
         "morning:2026-11-10",
+        "daily:2026-11-09",
     ]
     assert "tokens_in" not in digests[0]
     status = get(api, owner_x, "status").json()
@@ -371,3 +376,30 @@ def test_mcp_x_intel_tools_read_through_the_api(api, harness, owner_x):
         asyncio.run(server.call_tool("intake.x-intel.signals", {"alert": "loud"}))
     with pytest.raises(ToolFailed):
         asyncio.run(server.call_tool("intake.x-intel.status", {"workspace": "x"}))
+
+
+def test_x3_digests_are_screened(lake, api, owner_x):
+    import psycopg
+
+    with psycopg.connect(lake.replace(READER, "postgres"), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE x_intel.digest_log SET error = 'answer names Globex' WHERE digest_id = 'daily:2026-11-09'"
+        )
+    body = get(api, owner_x, "digests").json()
+    assert [d["digest_id"] for d in body["items"]] == [
+        "midday:2026-11-10",
+        "morning:2026-11-10",
+    ]
+    assert body["withheld"] == 1
+    assert "globex" not in str(body).casefold()
+    assert len(get(api, owner_x, "digests", limit=1).json()["items"]) == 1
+
+
+def test_freshness_has_no_window(api, owner_x):
+    rows = {
+        r["dataset"]: r["newest"]
+        for r in get(api, owner_x, "freshness").json()["items"]
+    }
+    assert set(rows) == {"x_signals", "claims", "x_analyses", "digest_log"}
+    assert all(rows.values())
+    assert get(api, owner_x, "freshness").json()["withheld"] == 0

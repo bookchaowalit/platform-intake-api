@@ -6,6 +6,7 @@
     GET /v1/x-intel/claims     the open verification queue (or every claim)
     GET /v1/x-intel/analyses   one report week of the weekly analyses (default the newest)
     GET /v1/x-intel/digests    the Telegram digest log (ids, status, counts, cost; never message text)
+    GET /v1/x-intel/freshness  newest timestamp per dataset, no window (the data-sources freshness probe)
 
 The data is the owner's, not per workspace: callers need ``intake.x-post:read`` and the pinned workspace
 (``INTAKE_X_INTEL_WORKSPACE``). Reads go through a read-only role (``INTAKE_X_INTEL_DB_URL``) and every row naming a
@@ -388,7 +389,22 @@ def register(ctx: Context, environ: Mapping[str, str] | None = None) -> None:
         with reader(caller) as conn:
             rows = conn.execute(
                 f"SELECT {', '.join(DIGEST_COLS)} FROM {S}.digest_log ORDER BY window_end DESC, digest_id LIMIT %s",
-                [limit],
+                [limit * 3],
+            ).fetchall()
+        items, held = _screen(
+            rows, settings.denylist, limit
+        )  # error text can name a client too
+        return out(items, held)
+
+    @ctx.app.get("/v1/x-intel/freshness", tags=["x-intel"])
+    def freshness(caller: Caller) -> dict[str, Any]:
+        """Newest timestamp per dataset, with no time window (the data-sources probe reads this)."""
+        with reader(caller) as conn:
+            rows = conn.execute(
+                f"SELECT 'x_signals' AS dataset, max(collected_at) AS newest FROM {S}.mart_x_signal_priority"
+                f" UNION ALL SELECT 'claims', max(updated_at) FROM {S}.claims"
+                f" UNION ALL SELECT 'x_analyses', max(updated_at) FROM {S}.x_analyses"
+                f" UNION ALL SELECT 'digest_log', max(updated_at) FROM {S}.digest_log"
             ).fetchall()
         return out(rows, 0)
 
