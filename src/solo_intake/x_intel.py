@@ -23,13 +23,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, get_args
 
 import psycopg
+from cellkit.app import Context
+from cellkit.auth import Principal
 from fastapi import HTTPException
 from fastapi import Request as HttpRequest
 from fastapi.encoders import jsonable_encoder
 from psycopg.rows import dict_row
-
-from cellkit.app import Context
-from cellkit.auth import Principal
 
 S = "x_intel"
 DB_ENV = "INTAKE_X_INTEL_DB_URL"

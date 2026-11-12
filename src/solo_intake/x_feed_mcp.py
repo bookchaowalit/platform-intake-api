@@ -9,9 +9,9 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
 
+from cellkit.mcp import Extension, Strict
 from pydantic import Field
 
-from cellkit.mcp import Extension, Strict
 from solo_intake.x_feed import SEARCH_LIMIT
 from solo_intake.x_intel import MAX_LIMIT
 

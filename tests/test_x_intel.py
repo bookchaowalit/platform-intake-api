@@ -6,8 +6,8 @@ import uuid
 from typing import Any
 
 import pytest
-
 from cellkit.db import PORT
+
 from solo_intake import x_intel
 
 READER = "x_intel_reader"
