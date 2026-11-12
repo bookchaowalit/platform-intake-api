@@ -5,9 +5,8 @@ import uuid
 from typing import Any
 
 import pytest
-from x_feed_helpers import COLLECTED, COLLECTOR_SCOPES, PULLS, post_id, pull_id, rows
-
 from cellkit.mcp import ToolFailed, build_server
+from x_feed_helpers import COLLECTED, COLLECTOR_SCOPES, PULLS, post_id, pull_id, rows
 
 
 def bearer(headers: dict[str, str]) -> str:

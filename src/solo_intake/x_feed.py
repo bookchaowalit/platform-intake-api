@@ -28,6 +28,9 @@ from email.utils import parsedate_to_datetime
 from typing import Annotated, Any, get_args
 
 import psycopg
+from cellkit.app import Context, Plan, Work, coerce
+from cellkit.auth import Principal
+from cellkit.spec import Field as SpecField
 from fastapi import BackgroundTasks, HTTPException
 from fastapi import Request as HttpRequest
 from fastapi.encoders import jsonable_encoder
@@ -39,10 +42,6 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
-
-from cellkit.app import Context, Plan, Work, coerce
-from cellkit.auth import Principal
-from cellkit.spec import Field as SpecField
 
 SOURCE_KEY = "x-feed"
 DOMAIN = "social"
