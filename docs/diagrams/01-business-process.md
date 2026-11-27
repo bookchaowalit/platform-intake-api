@@ -1,62 +1,64 @@
 # 01 — Business process (As-Is / To-Be)
 
-Intake cell คือ "ประตูหน้า" ของ data lake: เก็บ registry ของ data source, queue ของ intake (payload หนึ่งชิ้นที่ต้อง land ลง lake พร้อม idempotency key, lease และผลลัพธ์ใน lake) และ event trail ของทุก intake. ตัว payload จริงอยู่ใน lake ไม่ได้อยู่ที่นี่ (`PRODUCT.md`). ตั้งแต่ SPEC-002 มี source พิเศษ `x-feed` ที่ Grok Bot collector push โพสต์ X เข้ามาตรง ๆ.
+platform-intake-api คือ Intake cell: API บน Railway (cellkit + Neon) ที่เป็นประตูหน้าของ data lake เก็บทะเบียนแหล่งข้อมูล คิว intake พร้อม lease และ event trail ของทุกสถานะ รับ X feed จาก collector ของ Grok Bot, เปิดอ่านข้อมูล X marts ให้ AI ของ owner และส่ง event ของ intake ผ่าน outbox ไป Kafka `data.ingest.v1` ทุกชั่วโมง
 
-ภาพ predecessor (SQLite CLI `data-intake-cli.py`, 2026-08-18) อยู่ที่ central flow pack [lake-intake](https://github.com/bookchaowalit/architecture-docs/blob/main/docs/architecture/flows/lake-intake/README.md) — reused เป็นบริบท; ข้อมูล 7 rows ถูก import จากตาราง SQLite `source_registry` / `intake_queue` มาที่ cell นี้ (`PRODUCT.md`).
+Last reviewed: 2026-11-27 · commit `b7bcb57`
 
 ## As-Is (จากโค้ดวันนี้)
 
-### A. Generic intake queue (sources / intakes / intake-events)
-
 ```mermaid
-flowchart LR
-  subgraph Pipeline["Lake pipeline (data-lake-pipelines via cell_store)"]
-    P1["Register source"] --> P2["Queue intake with Idempotency-Key"]
-    P2 --> P3["Claim: PATCH lease_owner + expected_version"]
-    P3 --> P4["Land payload in lake (outside this cell)"]
-    P4 --> P5["PATCH status + lake keys"]
-    P5 --> P6["POST intake-event (from_status, to_status)"]
-  end
-  subgraph Cell["intake-api"]
-    C1["Authorize via empire-platform"] --> C2["Write row under RLS"]
-    C2 --> C3["Execution begin / finish (audit)"]
-  end
-  P1 --> C1
-  P2 --> C1
-  P3 --> C1
-  P5 --> C1
-  P6 --> C1
+flowchart TD
+  PIPE["data-lake pipelines and automations, Bearer JWT"] --> CRUD["cellkit CRUD /v1/sources, /v1/intakes, /v1/intake-events"]
+  OWNER["owner AI via MCP intake-mcp"] --> CRUD
+  GROK["Grok Bot collector, token x-feed-collector"] --> PULL["POST /v1/x-feed/pulls, PUT watchlist and query-plan"]
+  CRUD --> AUTHZ{"JWT valid, permission intake.resource:read/write/delete?"}
+  PULL --> AUTHZ
+  AUTHZ -->|no| DENY["401 or 403"]
+  AUTHZ -->|yes| DB[("Neon db intake, RLS per workspace")]
+  DB --> RULES{"idempotency key unique, refs exist, version matches?"}
+  RULES -->|"409 or 422"| REFUSE["refused"]
+  RULES -->|ok| STORE["intake status, intake-event, x-posts, x-sightings"]
+  STORE --> TRG["trigger on intake.intakes writes intake.intake.status envelope"]
+  TRG --> OUTBOX[("intake.event_outbox")]
+  OUTBOX --> RELAY["intake-relay hourly :53, GH workflow relay-outbox.yml via jobs queue, role intake_relay"]
+  RELAY -->|"publish ack"| KAFKA["Kafka data.ingest.v1"]
+  RELAY -->|"publish fail"| BACKOFF["attempts + 1, retry with backoff 1 to 64 min"]
+  BACKOFF --> OUTBOX
+  KAFKA --> CONSUMERS["event-sink to Bronze, event-notifier to Telegram"]
+  STORE --> EXPORT["GET /v1/x-feed/pulls/id/rows, POST exported: pull verified, text purged after retention"]
+  EXPORT --> LAKE["data lake x_lakehouse [ต้องยืนยัน: ผู้เรียก export ตามกำหนด]"]
+  XMART[("Supabase x_intel marts")] --> XINTEL["GET /v1/x-intel/*, role x_intel_reader, 503 if env unset"]
+  XINTEL --> OWNER
 ```
 
-Sources: `cell.yaml`, `src/cellkit/app.py`, `PRODUCT.md`, `tests/test_intake_queries.py`
+Sources: `src/solo_intake/x_feed.py`, `src/solo_intake/x_intel.py`, `src/solo_intake/event_outbox.py`, `cell.yaml`, `migrations/0001_intake.sql`, `migrations/0003_event_outbox.sql`, `.github/workflows/relay-outbox.yml`, `README.md`, `PRODUCT.md`, `docs/x-feed-ingest.md`
 
-### B. X feed (SPEC-002)
+ข้อเท็จจริงสำคัญจากโค้ดและเอกสาร:
 
-```mermaid
-flowchart LR
-  G["Grok Bot collector (Chief Data)"] -->|"POST /v1/x-feed/pulls"| I["Ingest: validate rows, upsert posts, insert sightings"]
-  I --> L["Intake row x-feed:pull_id status landed + landed event"]
-  I --> R["Purge exported text older than retention"]
-  G -->|"PUT watchlist / query-plan"| S["Collector state upsert"]
-  E["x_feed_lake_export.py (data-lake-pipelines)"] -->|"GET /v1/x-feed/pulls?status=landed"| L
-  E -->|"GET rows, write Bronze, POST exported"| V["Intake verified + posts exported_at"]
-  A["Owner AIs via REST or intake-mcp"] -->|"search / top"| Q["Read posts"]
-```
+- CRUD ทั้งหมดมาจาก `platform-cellkit` (pinned 1.0.11) ตาม `cell.yaml`; repo นี้เป็นเจ้าของ `cell.yaml`, migrations และโมดูล `src/solo_intake/`
+- relay เรียงลำดับตาม key: แถวที่ล้มเหลวจะส่งเฉพาะแถวนั้นก่อน และรอ backoff (`SELECT_UNSENT`, `MARK_FAILED`)
+- ไม่บังคับ: `from_status`/`to_status` ของ event ตรงกับ intake จริง, `domain`/`dataset` ตรงกับ source (PRODUCT.md)
+- ผู้เรียก export ของ X feed และ host ที่ตั้งเวลายังไม่ยืนยันจากโค้ด; spec 002 ระบุว่ายังไม่มี host (ความเสี่ยง #2) [ต้องยืนยัน]
+- `platform-event-hub-api` เขียน intake ที่นี่หรือไม่: PRODUCT.md ระบุ [ต้องยืนยัน]
 
-Sources: `src/solo_intake/x_feed.py`, `docs/x-feed-ingest.md`, `specs/002-x-feed/spec.md`
+## To-Be (ไม่มีที่ระบุเป็นสถานะเป้าหมาย)
 
-ข้อสังเกต As-Is:
-- API **ไม่ enforce** การเปลี่ยน status ของ intake (event `from_status`/`to_status` ไม่ถูกเทียบกับ status จริง, `domain`/`dataset` ของ intake ไม่ถูกเทียบกับ source) — `PRODUCT.md` "Not enforced". กติกา lifecycle อยู่ที่ client.
-- ทาง X feed เป็นทางเดียวที่โค้ดใน repo นี้เปลี่ยน status เอง (`landed`, `verified`, reopen กลับ `landed`).
-- Lake export scheduler ยังไม่มี host (SPEC-002 risk #2) ดังนั้น pull ค้างที่ `landed` และ text ไม่ถูก purge จนกว่าจะ export.
+ไม่มี To-Be ที่เขียนไว้: `specs/001-l2-baseline`, `002-x-feed` และ `003-x-intel-read` บรรยายสิ่งที่ implement แล้ว สถานะยัง "in review / owner approval pending" (001, 002) และ "approved" (003) ส่วน `PRODUCT.md` §Measures เป็นตัวชี้วัดที่เสนอ (proposed) และยังไม่มีใครเก็บ
 
-## To-Be (จาก PRODUCT.md / specs เท่านั้น)
+Sources: `specs/001-l2-baseline/spec.md`, `specs/002-x-feed/spec.md`, `specs/003-x-intel-read/spec.md`, `PRODUCT.md`
 
-- `PRODUCT.md` Measures (proposed, ยังไม่มีอะไรเก็บ): intake ค้างใน `processing` เกิน `lease_expires_at`; สัดส่วน `failed`/`rejected` ต่อสัปดาห์ต่อ source; 5xx และ p95 ของ `/v1/*`.
-- SPEC-002 §2/§7: lake export รันเป็น Railway cron ใน `data-schedules` (owner decision D6); ปลด Google Sheet หลัง parallel run.
+## Gap
+
+| ID | As-Is → To-Be | Status | Owner | Evidence |
+|---|---|---|---|---|
+| G1 | spec 001 และ 002 สถานะ "owner approval pending" → owner อนุมัติ spec | decide | owner | `specs/001-l2-baseline/spec.md` §Approval; `specs/002-x-feed/spec.md` |
+| G2 | ไม่มีใครเก็บ measures (intake ค้างเกิน lease, สัดส่วน failed/rejected, 5xx และ p95) → เก็บและดูได้ | todo | claude | `PRODUCT.md` §Measures (Proposed, nothing collects these yet) |
+| G3 | lake export ของ X feed ไม่มี host ตั้งเวลา → export ตามกำหนดให้ pull ไม่ค้างที่ `landed` และ purge ข้อความได้ | decide | owner | `specs/002-x-feed/spec.md` §7 ความเสี่ยง #2 |
+| G4 | token `x-feed-collector` หมดอายุ 30 วัน และ rotate อัตโนมัติไม่ได้ → rotate เป็นกระบวนการที่ไม่พึ่งมือ | decide | owner | `specs/002-x-feed/spec.md` §7 ความเสี่ยง #1; `docs/x-feed-ingest.md` §Token |
+| G5 | ไม่บังคับให้ event `from_status`/`to_status` และ `domain`/`dataset` ตรงกับ intake/source → บังคับหรือยอมรับ | decide | owner | `PRODUCT.md` §Capabilities (Not enforced) |
+| G6 | ไม่มี To-Be ของกระบวนการ → owner กำหนด | decide | owner | ไม่มีใน `PRODUCT.md` / `specs/` |
 
 ## Open questions
 
-- `platform-event-hub-api` เขียน intake ที่นี่หรือไม่ (`PRODUCT.md` [ต้องยืนยัน]).
-- จะย้ายกติกา state transition (ที่ CLI เดิม enforce) มาไว้ใน API หรือคงไว้ที่ client?
-- Lake export cron ใน `data-schedules` ขึ้นแล้วหรือยัง (SPEC-002 risk #2).
+- `platform-event-hub-api` เขียน intake ที่นี่หรือไม่ (PRODUCT.md ระบุ [ต้องยืนยัน])
+- ใครเรียก `POST /v1/x-feed/pulls/{id}/exported` ตามกำหนดใน production ตอนนี้
